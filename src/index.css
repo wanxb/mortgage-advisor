@@ -3,12 +3,20 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: light dark;
   color: #0f172a;
   background: #f8fafc;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #e2e8f0;
+    background: #0b1220;
+  }
 }
 
 body {
@@ -29,4 +37,94 @@ button {
 
 .money-figures {
   font-variant-numeric: tabular-nums;
+}
+
+/* Native date / number inputs: subtle border + spacing tweaks */
+input[type='date'] {
+  appearance: none;
+  position: relative;
+}
+
+input[type='date']::-webkit-calendar-picker-indicator {
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+input[type='date']:hover::-webkit-calendar-picker-indicator,
+input[type='date']:focus::-webkit-calendar-picker-indicator {
+  opacity: 1;
+}
+
+@media (prefers-color-scheme: dark) {
+  input[type='date']::-webkit-calendar-picker-indicator {
+    filter: invert(0.85);
+  }
+}
+
+/* Range slider */
+input[type='range'].advisor-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range'].advisor-range:focus {
+  outline: none;
+}
+input[type='range'].advisor-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #2563eb var(--advisor-range-progress, 50%), #e2e8f0 var(--advisor-range-progress, 50%));
+}
+input[type='range'].advisor-range::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: #e2e8f0;
+}
+input[type='range'].advisor-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 9999px;
+  background: #2563eb;
+}
+input[type='range'].advisor-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #2563eb;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.15);
+  transition: transform 0.1s ease;
+}
+input[type='range'].advisor-range::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+input[type='range'].advisor-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 2px solid #2563eb;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  input[type='range'].advisor-range::-webkit-slider-runnable-track {
+    background: linear-gradient(to right, #60a5fa var(--advisor-range-progress, 50%), #334155 var(--advisor-range-progress, 50%));
+  }
+  input[type='range'].advisor-range::-moz-range-track {
+    background: #334155;
+  }
+  input[type='range'].advisor-range::-moz-range-progress {
+    background: #60a5fa;
+  }
+  input[type='range'].advisor-range::-webkit-slider-thumb,
+  input[type='range'].advisor-range::-moz-range-thumb {
+    background: #0f172a;
+    border-color: #60a5fa;
+  }
 }

@@ -134,6 +134,7 @@ export interface HistoricalRateChangeEvent {
   type: 'rateChange';
   date: string;
   annualRate: number;
+  penaltyFee?: number;
 }
 
 export interface HistoricalPrepaymentEvent {

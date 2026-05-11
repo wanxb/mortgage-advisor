@@ -579,12 +579,15 @@ export function calculateHistoricalLoanPlan(input: LoanInput, events: Historical
 
   while (remainingPeriods > 0 && currentPrincipal > 0) {
     const monthEvents = eventsByMonth.get(getMonthKey(currentDate)) || [];
+    let pendingRatePenalty = 0;
     monthEvents
       .filter((event): event is Extract<HistoricalLoanEvent, { type: 'rateChange' }> => event.type === 'rateChange')
       .forEach((event) => {
         if (event.annualRate < 0) throw new Error('历史利率不能小于 0');
         currentAnnualRate = event.annualRate;
         targetPayment = calculatePaymentAmount(currentPrincipal, remainingPeriods, currentAnnualRate, input.repaymentMethod);
+        pendingRatePenalty = roundMoney(pendingRatePenalty + (event.penaltyFee || 0));
+        totalPenaltyFee = roundMoney(totalPenaltyFee + (event.penaltyFee || 0));
       });
 
     const monthlyRate = getMonthlyRate(currentAnnualRate);
@@ -601,7 +604,7 @@ export function calculateHistoricalLoanPlan(input: LoanInput, events: Historical
     totalPaidInterest = roundMoney(totalPaidInterest + interest);
 
     let extraPrincipal = 0;
-    let penaltyFee = 0;
+    let penaltyFee = pendingRatePenalty;
 
     monthEvents
       .filter((event): event is Extract<HistoricalLoanEvent, { type: 'prepayment' }> => event.type === 'prepayment')
