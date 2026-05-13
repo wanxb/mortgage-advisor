@@ -1,4 +1,5 @@
 export type LoanType = 'commercial' | 'fund' | 'combined';
+export type LoanPart = 'commercial' | 'fund';
 export type RepaymentMethod = 'equalPayment' | 'equalPrincipal';
 export type PrepaymentMode = 'reduceTerm' | 'reducePayment';
 
@@ -22,6 +23,7 @@ export interface LoanInput {
 export interface PaymentScheduleItem {
   period: number;
   date: string;
+  loanPart?: LoanPart;
   annualRate?: number;
   payment: number;
   principal: number;
@@ -67,6 +69,7 @@ export interface PrepaymentInput {
   date: string;
   amount: number;
   mode: PrepaymentMode;
+  target?: LoanPart;
   includeCurrentMonthPayment?: boolean;
   penaltyFee?: number;
 }
@@ -95,6 +98,9 @@ export interface PrepaymentResult {
 export interface RateAdjustInput {
   effectiveDate: string;
   newAnnualRate: number;
+  newCommercialRate?: number;
+  newFundRate?: number;
+  includeEffectiveMonthPayment?: boolean;
 }
 
 export interface RateAdjustCompare {
@@ -115,9 +121,12 @@ export interface RateAdjustResult {
 }
 
 export interface RateSegmentSummary {
+  loanPart?: LoanPart;
   startDate: string;
   endDate: string;
   annualRate: number;
+  commercialRate?: number;
+  fundRate?: number;
   periods: number;
   totalPayment: number;
   totalPrincipal: number;
@@ -135,6 +144,7 @@ export interface HistoricalRateChangeEvent {
   date: string;
   annualRate: number;
   penaltyFee?: number;
+  target?: 'commercial' | 'fund';
 }
 
 export interface HistoricalPrepaymentEvent {
@@ -144,6 +154,7 @@ export interface HistoricalPrepaymentEvent {
   amount: number;
   mode: PrepaymentMode;
   penaltyFee?: number;
+  target?: 'commercial' | 'fund';
 }
 
 export type HistoricalLoanEvent = HistoricalRateChangeEvent | HistoricalPrepaymentEvent;
@@ -162,6 +173,7 @@ export interface HistoricalLoanResult {
 export interface PrepaymentComparisonInput {
   date: string;
   amount: number;
+  target?: LoanPart;
   includeCurrentMonthPayment?: boolean;
   penaltyFee?: number;
 }

@@ -37,12 +37,55 @@ button {
 
 .money-figures {
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.advisor-data-table th,
+.advisor-data-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advisor-data-table .date-cell {
+  text-overflow: clip;
+}
+
+.advisor-data-table .rate-cell {
+  overflow: visible;
+  text-overflow: unset;
+}
+
+.advisor-compare-table th,
+.advisor-compare-table td {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.advisor-compare-table .compare-heading {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.advisor-compare-table .money-figures {
+  white-space: nowrap;
+}
+
+.advisor-scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.advisor-scrollbar-hidden::-webkit-scrollbar {
+  display: none;
 }
 
 /* Native date / number inputs: subtle border + spacing tweaks */
 input[type='date'] {
   appearance: none;
   position: relative;
+  min-width: 9.5rem;
 }
 
 input[type='date']::-webkit-calendar-picker-indicator {

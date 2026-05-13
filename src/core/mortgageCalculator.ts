@@ -210,6 +210,8 @@ export function calculateCombinedLoanPlan(input: LoanInput): LoanPlan {
     schedule.push({
       period: i + 1,
       date: commercial?.date || fund?.date || addMonths(input.firstPaymentDate, i),
+      // Only set annualRate when exactly one sub-loan is active; undefined when both are active (rates differ)
+      annualRate: (!commercial || !fund) ? (commercial?.annualRate ?? fund?.annualRate) : undefined,
       payment: roundMoney((commercial?.payment || 0) + (fund?.payment || 0)),
       principal: roundMoney((commercial?.principal || 0) + (fund?.principal || 0)),
       interest: roundMoney((commercial?.interest || 0) + (fund?.interest || 0)),
@@ -257,21 +259,30 @@ function buildLoanPlan(input: LoanInput, schedule: PaymentScheduleItem[]): LoanP
 }
 
 export function buildAnnualSummary(schedule: PaymentScheduleItem[]): AnnualSummaryItem[] {
-  const yearMap = new Map<number, PaymentScheduleItem[]>();
+  const yearMap = new Map<number, { sourceMonths: PaymentScheduleItem[]; displayMonths: PaymentScheduleItem[] }>();
   schedule.forEach((item) => {
-    const list = yearMap.get(getYear(item.date)) || [];
-    list.push(item);
-    yearMap.set(getYear(item.date), list);
+    const year = getYear(item.date);
+    const group = yearMap.get(year) || { sourceMonths: [], displayMonths: [] };
+    group.sourceMonths.push(item);
+    group.displayMonths.push(...getDisplayScheduleItems(item));
+    yearMap.set(year, group);
   });
 
-  return Array.from(yearMap.entries()).map(([year, months]) => ({
+  return Array.from(yearMap.entries()).map(([year, { sourceMonths, displayMonths }]) => ({
     year,
-    totalPayment: sum(months.map((x) => x.payment)),
-    totalPrincipal: sum(months.map((x) => x.principal)),
-    totalInterest: sum(months.map((x) => x.interest)),
-    endRemainingPrincipal: months[months.length - 1]?.remainingPrincipal || 0,
-    months,
+    totalPayment: sum(sourceMonths.map((x) => x.payment)),
+    totalPrincipal: sum(sourceMonths.map((x) => x.principal)),
+    totalInterest: sum(sourceMonths.map((x) => x.interest)),
+    endRemainingPrincipal: sourceMonths[sourceMonths.length - 1]?.remainingPrincipal || 0,
+    months: displayMonths,
   }));
+}
+
+function getDisplayScheduleItems(item: PaymentScheduleItem): PaymentScheduleItem[] {
+  const rows: PaymentScheduleItem[] = [];
+  if (item.commercial) rows.push({ ...item.commercial, period: item.period, date: item.date, loanPart: 'commercial' });
+  if (item.fund) rows.push({ ...item.fund, period: item.period, date: item.date, loanPart: 'fund' });
+  return rows.length > 0 ? rows : [item];
 }
 
 function findNodeByDate(schedule: PaymentScheduleItem[], date: string): PaymentScheduleItem {
@@ -280,8 +291,148 @@ function findNodeByDate(schedule: PaymentScheduleItem[], date: string): PaymentS
   return node;
 }
 
+// For combined loans, derive a blended rate from active sub-loans weighted by remaining principal.
+function getEffectiveAnnualRate(node: PaymentScheduleItem, input: LoanInput): number {
+  if (input.loanType === 'combined') {
+    const comm = node.commercial;
+    const fund = node.fund;
+    if (comm && !fund) return comm.annualRate ?? input.commercial?.annualRate ?? 0;
+    if (fund && !comm) return fund.annualRate ?? input.fund?.annualRate ?? 0;
+    if (comm && fund) {
+      const total = comm.remainingPrincipal + fund.remainingPrincipal;
+      if (total <= 0) return 0;
+      return ((comm.annualRate ?? 0) * comm.remainingPrincipal + (fund.annualRate ?? 0) * fund.remainingPrincipal) / total;
+    }
+  }
+  return node.annualRate ?? input.annualRate;
+}
+
+// Reconstruct a sub-loan LoanPlan from the merged combined plan's stored sub-items.
+function extractSubPlan(combinedPlan: LoanPlan, subType: 'commercial' | 'fund'): LoanPlan {
+  const subInput = combinedPlan.input[subType];
+  if (!subInput) throw new Error('组合贷参数不完整');
+
+  const subItems = combinedPlan.schedule
+    .filter((item) => item[subType] != null)
+    .map((item) => item[subType]!);
+
+  const loanInput: LoanInput = {
+    loanType: subType === 'commercial' ? 'commercial' : 'fund',
+    repaymentMethod: combinedPlan.input.repaymentMethod,
+    amount: subInput.amount,
+    years: subInput.years,
+    annualRate: subInput.annualRate,
+    firstPaymentDate: subItems[0]?.date || combinedPlan.input.firstPaymentDate,
+  };
+
+  return {
+    input: loanInput,
+    schedule: subItems,
+    annualSummary: buildAnnualSummary(subItems),
+    summary: {
+      totalPrincipal: subInput.amount,
+      totalInterest: sum(subItems.map((x) => x.interest)),
+      totalPayment: roundMoney(subInput.amount + sum(subItems.map((x) => x.interest))),
+      monthlyPayment: roundMoney(subItems[0]?.payment || 0),
+      firstMonthPayment: roundMoney(subItems[0]?.payment || 0),
+      lastMonthPayment: roundMoney(subItems[subItems.length - 1]?.payment || 0),
+      totalPeriods: subItems.length,
+      endDate: subItems[subItems.length - 1]?.date || combinedPlan.input.firstPaymentDate,
+    },
+  };
+}
+
+function mergeCombinedSchedule(
+  commSchedule: PaymentScheduleItem[],
+  fundSchedule: PaymentScheduleItem[],
+  commFallbackPrincipal: number,
+  fundFallbackPrincipal: number,
+  commFallbackInterest: number,
+  fundFallbackInterest: number,
+): PaymentScheduleItem[] {
+  const maxPeriods = Math.max(commSchedule.length, fundSchedule.length);
+  const result: PaymentScheduleItem[] = [];
+  for (let i = 0; i < maxPeriods; i += 1) {
+    const comm = commSchedule[i];
+    const fund = fundSchedule[i];
+    result.push({
+      period: i + 1,
+      date: comm?.date || fund?.date || '',
+      annualRate: (!comm || !fund) ? (comm?.annualRate ?? fund?.annualRate) : undefined,
+      payment: roundMoney((comm?.payment || 0) + (fund?.payment || 0)),
+      principal: roundMoney((comm?.principal || 0) + (fund?.principal || 0)),
+      interest: roundMoney((comm?.interest || 0) + (fund?.interest || 0)),
+      extraPrincipal: roundMoney((comm?.extraPrincipal || 0) + (fund?.extraPrincipal || 0)),
+      penaltyFee: roundMoney((comm?.penaltyFee || 0) + (fund?.penaltyFee || 0)),
+      remainingPrincipal: roundMoney((comm?.remainingPrincipal || 0) + (fund?.remainingPrincipal || 0)),
+      totalPaidPrincipal: roundMoney(
+        (comm?.totalPaidPrincipal ?? commFallbackPrincipal) +
+        (fund?.totalPaidPrincipal ?? fundFallbackPrincipal),
+      ),
+      totalPaidInterest: roundMoney(
+        (comm?.totalPaidInterest ?? commFallbackInterest) +
+        (fund?.totalPaidInterest ?? fundFallbackInterest),
+      ),
+      commercial: comm,
+      fund,
+    });
+  }
+  return result;
+}
+
 function getRemainingInterestFromPeriod(plan: LoanPlan, startPeriod: number): number {
   return sum(plan.schedule.filter((item) => item.period > startPeriod).map((item) => item.interest));
+}
+
+function calculateCombinedPrepaymentPlan(originalPlan: LoanPlan, input: PrepaymentInput): PrepaymentResult {
+  const target = input.target ?? 'commercial';
+  const other = target === 'commercial' ? 'fund' : 'commercial';
+  if (!originalPlan.input.commercial || !originalPlan.input.fund) throw new Error('组合贷参数不完整');
+
+  const node = findNodeByDate(originalPlan.schedule, input.date);
+  const includeCurrentMonthPayment = input.includeCurrentMonthPayment ?? true;
+  const anchorPeriod = originalPlan.schedule.filter((item) =>
+    includeCurrentMonthPayment ? item.period <= node.period : item.period < node.period,
+  ).length;
+
+  const targetPlan = extractSubPlan(originalPlan, target);
+  const otherPlan = extractSubPlan(originalPlan, other);
+  const targetResult = calculatePrepaymentPlan(targetPlan, input);
+  const adjustedCommSchedule = target === 'commercial' ? targetResult.adjustedPlan.schedule : otherPlan.schedule;
+  const adjustedFundSchedule = target === 'fund' ? targetResult.adjustedPlan.schedule : otherPlan.schedule;
+
+  const mergedSchedule = mergeCombinedSchedule(
+    adjustedCommSchedule,
+    adjustedFundSchedule,
+    originalPlan.input.commercial.amount,
+    originalPlan.input.fund.amount,
+    extractSubPlan(originalPlan, 'commercial').summary.totalInterest,
+    extractSubPlan(originalPlan, 'fund').summary.totalInterest,
+  );
+  const adjustedPlan = buildLoanPlan(originalPlan.input, mergedSchedule);
+  const originalRemainingInterest = getRemainingInterestFromPeriod(originalPlan, anchorPeriod);
+  const adjustedRemainingInterest = getRemainingInterestFromPeriod(adjustedPlan, anchorPeriod);
+  const adjustedMonthlyPayment = adjustedPlan.schedule[anchorPeriod]?.payment || 0;
+  const penaltyFee = input.penaltyFee || 0;
+
+  return {
+    originalPlan,
+    adjustedPlan,
+    compare: {
+      originalRemainingPrincipal: roundMoney(node.remainingPrincipal),
+      adjustedRemainingPrincipal: roundMoney(node.remainingPrincipal - input.amount),
+      originalMonthlyPayment: roundMoney(node.payment),
+      adjustedMonthlyPayment: roundMoney(adjustedMonthlyPayment),
+      originalRemainingPeriods: originalPlan.summary.totalPeriods - anchorPeriod,
+      adjustedRemainingPeriods: Math.max(0, adjustedPlan.summary.totalPeriods - anchorPeriod),
+      originalRemainingInterest,
+      adjustedRemainingInterest,
+      savedInterest: roundMoney(originalRemainingInterest - adjustedRemainingInterest - penaltyFee),
+      originalEndDate: originalPlan.summary.endDate,
+      adjustedEndDate: adjustedPlan.summary.endDate,
+      penaltyFee,
+    },
+  };
 }
 
 function calculateScheduleByPrincipalPeriodsRate(params: {
@@ -399,6 +550,10 @@ function rebuildAdjustedSchedule(
 }
 
 export function calculatePrepaymentPlan(originalPlan: LoanPlan, input: PrepaymentInput): PrepaymentResult {
+  if (originalPlan.input.loanType === 'combined') {
+    return calculateCombinedPrepaymentPlan(originalPlan, input);
+  }
+
   const node = findNodeByDate(originalPlan.schedule, input.date);
   const includeCurrentMonthPayment = input.includeCurrentMonthPayment ?? true;
   const paidSchedule = originalPlan.schedule.filter((item) => includeCurrentMonthPayment ? item.period <= node.period : item.period < node.period);
@@ -415,19 +570,20 @@ export function calculatePrepaymentPlan(originalPlan: LoanPlan, input: Prepaymen
   const adjustedPrincipal = roundMoney(currentRemainingPrincipal - input.amount);
   const remainingPeriods = originalPlan.summary.totalPeriods - anchorPeriod;
   const firstPaymentDate = addMonths(anchorDate, 1);
+  const currentAnnualRate = getEffectiveAnnualRate(node, originalPlan.input);
   const remainingSchedule = input.mode === 'reducePayment'
     ? calculateScheduleByPrincipalPeriodsRate({
       principal: adjustedPrincipal,
       periods: remainingPeriods,
-      annualRate: originalPlan.input.annualRate,
+      annualRate: currentAnnualRate,
       repaymentMethod: originalPlan.input.repaymentMethod,
       firstPaymentDate,
     })
     : calculateScheduleByTargetPayment({
       principal: adjustedPrincipal,
       targetPayment: node.payment,
-      annualRate: originalPlan.input.annualRate,
-      monthlyRate: getMonthlyRate(originalPlan.input.annualRate),
+      annualRate: currentAnnualRate,
+      monthlyRate: getMonthlyRate(currentAnnualRate),
       repaymentMethod: originalPlan.input.repaymentMethod,
       firstPaymentDate,
     });
@@ -486,25 +642,107 @@ export function calculatePrepaymentComparison(
   return result;
 }
 
+function calculateCombinedRateAdjustedPlan(originalPlan: LoanPlan, input: RateAdjustInput): RateAdjustResult {
+  if (!originalPlan.input.commercial || !originalPlan.input.fund) throw new Error('组合贷参数不完整');
+
+  const commSubPlan = extractSubPlan(originalPlan, 'commercial');
+  const fundSubPlan = extractSubPlan(originalPlan, 'fund');
+
+  const newCommRate = input.newCommercialRate ?? commSubPlan.input.annualRate;
+  const newFundRate = input.newFundRate ?? fundSubPlan.input.annualRate;
+
+  if (newCommRate < 0) throw new Error('商贷新利率不能小于 0');
+  if (newFundRate < 0) throw new Error('公积金贷新利率不能小于 0');
+
+  // Validate date against combined schedule first (throws if past end of loan)
+  const node = findNodeByDate(originalPlan.schedule, input.effectiveDate);
+  const includeEffective = input.includeEffectiveMonthPayment ?? false;
+  const anchorPeriod = originalPlan.schedule.filter((item) =>
+    includeEffective ? item.period <= node.period : item.period < node.period,
+  ).length;
+
+  let adjustedCommSchedule = commSubPlan.schedule;
+  let adjustedFundSchedule = fundSubPlan.schedule;
+
+  try {
+    adjustedCommSchedule = calculateRateAdjustedPlan(commSubPlan, {
+      ...input,
+      newAnnualRate: newCommRate,
+    }).adjustedPlan.schedule;
+  } catch {
+    // Sub-loan ended before effective date — keep original
+  }
+
+  try {
+    adjustedFundSchedule = calculateRateAdjustedPlan(fundSubPlan, {
+      ...input,
+      newAnnualRate: newFundRate,
+    }).adjustedPlan.schedule;
+  } catch {
+    // Sub-loan ended before effective date — keep original
+  }
+
+  const mergedSchedule = mergeCombinedSchedule(
+    adjustedCommSchedule,
+    adjustedFundSchedule,
+    originalPlan.input.commercial.amount,
+    originalPlan.input.fund.amount,
+    commSubPlan.summary.totalInterest,
+    fundSubPlan.summary.totalInterest,
+  );
+
+  const adjustedPlan = buildLoanPlan(originalPlan.input, mergedSchedule);
+  const oldMonthlyPayment = originalPlan.schedule[anchorPeriod]?.payment || node.payment;
+  const newMonthlyPayment = adjustedPlan.schedule[anchorPeriod]?.payment || 0;
+  const oldRemainingInterest = getRemainingInterestFromPeriod(originalPlan, anchorPeriod);
+  const newRemainingInterest = getRemainingInterestFromPeriod(adjustedPlan, anchorPeriod);
+
+  return {
+    originalPlan,
+    adjustedPlan,
+    compare: {
+      oldMonthlyPayment: roundMoney(oldMonthlyPayment),
+      newMonthlyPayment: roundMoney(newMonthlyPayment),
+      monthlyPaymentDiff: roundMoney(newMonthlyPayment - oldMonthlyPayment),
+      oldRemainingInterest,
+      newRemainingInterest,
+      interestDiff: roundMoney(newRemainingInterest - oldRemainingInterest),
+      oldEndDate: originalPlan.summary.endDate,
+      newEndDate: adjustedPlan.summary.endDate,
+    },
+  };
+}
+
 export function calculateRateAdjustedPlan(originalPlan: LoanPlan, input: RateAdjustInput): RateAdjustResult {
+  if (originalPlan.input.loanType === 'combined') {
+    return calculateCombinedRateAdjustedPlan(originalPlan, input);
+  }
   if (input.newAnnualRate < 0) throw new Error('新利率不能小于 0');
   const node = findNodeByDate(originalPlan.schedule, input.effectiveDate);
-  const paidSchedule = originalPlan.schedule.filter((item) => item.period <= node.period);
-  const remainingPeriods = originalPlan.summary.totalPeriods - node.period;
+  const includeEffectiveMonthPayment = input.includeEffectiveMonthPayment ?? false;
+  const paidSchedule = originalPlan.schedule.filter((item) => (
+    includeEffectiveMonthPayment ? item.period <= node.period : item.period < node.period
+  ));
+  const lastPaid = paidSchedule[paidSchedule.length - 1];
+  const currentPrincipal = includeEffectiveMonthPayment
+    ? node.remainingPrincipal
+    : lastPaid?.remainingPrincipal ?? originalPlan.summary.totalPrincipal;
+  const anchorPeriod = paidSchedule.length;
+  const remainingPeriods = originalPlan.summary.totalPeriods - anchorPeriod;
   const remainingSchedule = calculateScheduleByPrincipalPeriodsRate({
-    principal: node.remainingPrincipal,
+    principal: currentPrincipal,
     periods: remainingPeriods,
     annualRate: input.newAnnualRate,
     repaymentMethod: originalPlan.input.repaymentMethod,
-    firstPaymentDate: addMonths(node.date, 1),
+    firstPaymentDate: includeEffectiveMonthPayment ? addMonths(node.date, 1) : node.date,
   });
 
-  const adjustedSchedule = rebuildAdjustedSchedule(paidSchedule, remainingSchedule, node.remainingPrincipal, 0);
+  const adjustedSchedule = rebuildAdjustedSchedule(paidSchedule, remainingSchedule, currentPrincipal, 0);
   const adjustedPlan = buildLoanPlan({ ...originalPlan.input, annualRate: input.newAnnualRate }, adjustedSchedule);
-  const oldRemainingInterest = getRemainingInterestFromPeriod(originalPlan, node.period);
-  const newRemainingInterest = sum(adjustedPlan.schedule.filter((item) => item.period > node.period).map((item) => item.interest));
-  const oldMonthlyPayment = originalPlan.schedule[node.period]?.payment || node.payment;
-  const newMonthlyPayment = adjustedPlan.schedule[node.period]?.payment || 0;
+  const oldRemainingInterest = getRemainingInterestFromPeriod(originalPlan, anchorPeriod);
+  const newRemainingInterest = sum(adjustedPlan.schedule.filter((item) => item.period > anchorPeriod).map((item) => item.interest));
+  const oldMonthlyPayment = originalPlan.schedule[anchorPeriod]?.payment || node.payment;
+  const newMonthlyPayment = adjustedPlan.schedule[anchorPeriod]?.payment || 0;
 
   return {
     originalPlan,
@@ -550,9 +788,61 @@ function recalculatePeriodsByTargetPayment(
   return Math.ceil(Math.log(targetPayment / (targetPayment - principal * monthlyRate)) / Math.log(1 + monthlyRate));
 }
 
+function calculateCombinedHistoricalLoanPlan(input: LoanInput, events: HistoricalLoanEvent[]): HistoricalLoanResult {
+  if (!input.commercial || !input.fund) throw new Error('组合贷参数不完整');
+
+  const commInput: LoanInput = {
+    ...input,
+    loanType: 'commercial',
+    amount: input.commercial.amount,
+    years: input.commercial.years,
+    annualRate: input.commercial.annualRate,
+  };
+  const fundInput: LoanInput = {
+    ...input,
+    loanType: 'fund',
+    amount: input.fund.amount,
+    years: input.fund.years,
+    annualRate: input.fund.annualRate,
+  };
+
+  // Events without explicit target default to commercial for backward compatibility
+  const commEvents = events.filter((e) => !e.target || e.target === 'commercial');
+  const fundEvents = events.filter((e) => e.target === 'fund');
+
+  const commResult = calculateHistoricalLoanPlan(commInput, commEvents);
+  const fundResult = calculateHistoricalLoanPlan(fundInput, fundEvents);
+
+  const mergedSchedule = mergeCombinedSchedule(
+    commResult.adjustedPlan.schedule,
+    fundResult.adjustedPlan.schedule,
+    input.commercial.amount,
+    input.fund.amount,
+    commResult.basePlan.summary.totalInterest,
+    fundResult.basePlan.summary.totalInterest,
+  );
+
+  const basePlan = calculateCombinedLoanPlan(input);
+  const adjustedPlan = buildLoanPlan(input, mergedSchedule);
+  const totalExtraPrincipal = roundMoney(commResult.totalExtraPrincipal + fundResult.totalExtraPrincipal);
+  const totalPenaltyFee = roundMoney(commResult.totalPenaltyFee + fundResult.totalPenaltyFee);
+  const savedInterest = roundMoney(basePlan.summary.totalInterest - adjustedPlan.summary.totalInterest - totalPenaltyFee);
+
+  return {
+    basePlan,
+    adjustedPlan,
+    events: [...events].sort((a, b) => a.date.localeCompare(b.date)),
+    rateSegments: buildRateSegmentSummary(adjustedPlan.schedule),
+    totalExtraPrincipal,
+    totalPenaltyFee,
+    savedInterest,
+    actualCashOut: roundMoney(adjustedPlan.summary.totalPayment + totalPenaltyFee),
+  };
+}
+
 export function calculateHistoricalLoanPlan(input: LoanInput, events: HistoricalLoanEvent[]): HistoricalLoanResult {
   if (input.loanType === 'combined') {
-    throw new Error('组合贷历史事件需要分别指定商贷/公积金贷，当前版本先支持单贷');
+    return calculateCombinedHistoricalLoanPlan(input, events);
   }
 
   validateLoanInput(input);
@@ -659,14 +949,33 @@ export function calculateHistoricalLoanPlan(input: LoanInput, events: Historical
 }
 
 export function buildRateSegmentSummary(schedule: PaymentScheduleItem[]): RateSegmentSummary[] {
+  if (schedule.some((item) => item.commercial || item.fund)) {
+    return (['commercial', 'fund'] as const)
+      .flatMap((loanPart) => buildRateSegmentSummary(
+        schedule
+          .filter((item) => item[loanPart] != null)
+          .map((item) => ({ ...item[loanPart]!, period: item.period, date: item.date, loanPart })),
+      ).map((segment) => ({
+        ...segment,
+        loanPart,
+        commercialRate: loanPart === 'commercial' ? segment.annualRate : undefined,
+        fundRate: loanPart === 'fund' ? segment.annualRate : undefined,
+      })))
+      .sort((a, b) => a.startDate.localeCompare(b.startDate) || (a.loanPart || '').localeCompare(b.loanPart || ''));
+  }
+
   const segments: RateSegmentSummary[] = [];
+  let currentKey = '';
 
   schedule.forEach((item) => {
     const annualRate = item.annualRate ?? 0;
-    const current = segments[segments.length - 1];
+    const key = `${item.loanPart ?? ''}_${annualRate}`;
 
-    if (!current || current.annualRate !== annualRate) {
+    const current = segments[segments.length - 1];
+    if (!current || currentKey !== key) {
+      currentKey = key;
       segments.push({
+        ...(item.loanPart ? { loanPart: item.loanPart } : {}),
         startDate: item.date,
         endDate: item.date,
         annualRate,

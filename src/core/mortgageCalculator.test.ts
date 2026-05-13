@@ -8,7 +8,7 @@ import {
   calculatePrepaymentPlan,
   calculateRateAdjustedPlan,
 } from './mortgageCalculator';
-import type { LoanInput } from '../types/mortgage';
+import type { HistoricalLoanEvent, LoanInput } from '../types/mortgage';
 
 const baseInput: LoanInput = {
   loanType: 'commercial',
@@ -105,6 +105,18 @@ describe('mortgage calculator', () => {
     expect(result.compare.interestDiff).toBeLessThan(0);
   });
 
+  it('can apply a rate change from the first remaining payment', () => {
+    const plan = calculateMortgagePlan(baseInput);
+    const result = calculateRateAdjustedPlan(plan, {
+      effectiveDate: baseInput.firstPaymentDate,
+      newAnnualRate: 3,
+    });
+
+    expect(result.adjustedPlan.schedule[0].date).toBe(baseInput.firstPaymentDate);
+    expect(result.adjustedPlan.schedule[0].annualRate).toBe(3);
+    expect(result.compare.newMonthlyPayment).toBeLessThan(result.compare.oldMonthlyPayment);
+  });
+
   it('reverses budget from affordable monthly payment', () => {
     const result = calculateBudgetReverse({
       affordableMonthlyPayment: 4_000,
@@ -173,5 +185,98 @@ describe('mortgage calculator', () => {
     expect(result.reducePayment).toBeDefined();
     expect(result.reduceTerm?.compare.adjustedRemainingPeriods).toBeLessThan(result.reducePayment?.compare.adjustedRemainingPeriods || 0);
     expect(result.reducePayment?.compare.adjustedMonthlyPayment).toBeLessThan(result.reducePayment?.compare.originalMonthlyPayment || 0);
+  });
+
+  it('calculates combined loan prepayment against the selected sub-loan', () => {
+    const combined = calculateMortgagePlan({
+      ...baseInput,
+      loanType: 'combined',
+      amount: 0,
+      commercial: { amount: 700_000, years: 30, annualRate: 3.7 },
+      fund: { amount: 300_000, years: 30, annualRate: 2.85 },
+    });
+    const result = calculatePrepaymentComparison(combined, {
+      date: '2028-06-01',
+      amount: 100_000,
+      target: 'commercial',
+      includeCurrentMonthPayment: true,
+      penaltyFee: 0,
+    });
+
+    expect(result.reduceTerm).toBeDefined();
+    expect(result.reducePayment).toBeDefined();
+    expect(result.reduceTerm?.adjustedPlan.schedule[0].fund?.remainingPrincipal).toBe(combined.schedule[0].fund?.remainingPrincipal);
+    expect(result.reduceTerm?.adjustedPlan.schedule.filter((item) => item.commercial).length)
+      .toBeLessThan(combined.schedule.filter((item) => item.commercial).length);
+    expect(result.reducePayment?.compare.adjustedMonthlyPayment).toBeLessThan(result.reducePayment?.compare.originalMonthlyPayment || 0);
+    expect(result.reduceTerm?.compare.savedInterest).toBeGreaterThan(0);
+  });
+
+  it('adjusts commercial and fund rates separately for combined loans', () => {
+    const combined = calculateMortgagePlan({
+      ...baseInput,
+      loanType: 'combined',
+      amount: 0,
+      commercial: { amount: 700_000, years: 30, annualRate: 3.7 },
+      fund: { amount: 300_000, years: 30, annualRate: 2.85 },
+    });
+    const result = calculateRateAdjustedPlan(combined, {
+      effectiveDate: '2028-01-01',
+      newAnnualRate: 0,
+      newCommercialRate: 3.5,
+      newFundRate: 2.6,
+    });
+
+    expect(result.compare.newMonthlyPayment).toBeLessThan(result.compare.oldMonthlyPayment);
+    expect(result.compare.interestDiff).toBeLessThan(0);
+    expect(result.adjustedPlan.schedule.length).toBe(combined.schedule.length);
+  });
+
+  it('calculates combined loan historical plan with per-sub-loan events', () => {
+    const combined = calculateMortgagePlan({
+      ...baseInput,
+      loanType: 'combined',
+      amount: 0,
+      commercial: { amount: 700_000, years: 30, annualRate: 3.7 },
+      fund: { amount: 300_000, years: 30, annualRate: 2.85 },
+    });
+    const events: HistoricalLoanEvent[] = [
+      { id: 'comm-rate', type: 'rateChange', date: '2028-01-01', annualRate: 3.5, target: 'commercial' },
+      { id: 'fund-rate', type: 'rateChange', date: '2028-01-01', annualRate: 2.6, target: 'fund' },
+      { id: 'comm-prepay', type: 'prepayment', date: '2029-06-01', amount: 80_000, mode: 'reduceTerm', target: 'commercial' },
+    ];
+    const result = calculateHistoricalLoanPlan(combined.input, events);
+
+    expect(result.basePlan.input.loanType).toBe('combined');
+    expect(result.events).toHaveLength(3);
+    expect(result.adjustedPlan.summary.totalInterest).toBeLessThan(result.basePlan.summary.totalInterest);
+    expect(result.totalExtraPrincipal).toBe(80_000);
+    expect(result.savedInterest).toBeGreaterThan(0);
+    expect(result.rateSegments.some((segment) => segment.loanPart === 'commercial' && segment.annualRate === 3.7)).toBe(true);
+    expect(result.rateSegments.some((segment) => segment.loanPart === 'fund' && segment.annualRate === 2.85)).toBe(true);
+
+    const firstMonth = result.adjustedPlan.schedule[0];
+    expect(firstMonth.commercial?.annualRate).toBe(3.7);
+    expect(firstMonth.fund?.annualRate).toBe(2.85);
+    expect(firstMonth.interest).toBeCloseTo((firstMonth.commercial?.interest || 0) + (firstMonth.fund?.interest || 0), 2);
+    expect(result.adjustedPlan.annualSummary[0].months[0].loanPart).toBe('commercial');
+    expect(result.adjustedPlan.annualSummary[0].months[0].annualRate).toBe(3.7);
+    expect(result.adjustedPlan.annualSummary[0].months[1].loanPart).toBe('fund');
+    expect(result.adjustedPlan.annualSummary[0].months[1].annualRate).toBe(2.85);
+  });
+
+  it('uses the active schedule rate when reducing term after historical rate cuts', () => {
+    const history = calculateHistoricalLoanPlan({ ...baseInput, annualRate: 5.145 }, [
+      { id: 'rate-cut', type: 'rateChange', date: '2027-01-01', annualRate: 3.5 },
+    ]);
+    const result = calculatePrepaymentComparison(history.adjustedPlan, {
+      date: '2028-06-01',
+      amount: 100_000,
+      includeCurrentMonthPayment: true,
+      penaltyFee: 0,
+    });
+
+    expect(result.reduceTerm?.compare.adjustedRemainingPeriods).toBeLessThan(result.reduceTerm?.compare.originalRemainingPeriods || 0);
+    expect(result.reduceTerm?.compare.savedInterest).toBeGreaterThan(0);
   });
 });
