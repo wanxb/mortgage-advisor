@@ -4,11 +4,11 @@
 
 ## 界面预览
 
-![房贷参谋预览 1](./docs/previews/preview_0.png)
+![房贷参谋预览 1](./previews/preview_0.png)
 
-![房贷参谋预览 2](./docs/previews/preview_1.png)
+![房贷参谋预览 2](./previews/preview_1.png)
 
-![房贷参谋预览 3](./docs/previews/preview_2.png)
+![房贷参谋预览 3](./previews/preview_2.png)
 
 ## 功能
 
